@@ -55,9 +55,10 @@ var FINGER_CONTENT_Y_RATIO      = 0.60;
 var PROP_EDGE_MARGIN            = 6;
 
 var RANDOM_LINE_PERCENT     = 10;
-var RANDOM_LINE_COOLDOWN_CLICKS = 30;
-var NODE_LINE_BLOCK_CLICKS  = 10;
-var NEAR_NODE_CLICKS        = 10;
+var RANDOM_LINE_COOLDOWN_CLICKS_HIT  = 30;   // 左键：30 下冷却
+var RANDOM_LINE_COOLDOWN_CLICKS_PROP = 20;   // 水枪/中指：20 下冷却
+var NODE_LINE_BLOCK_CLICKS  = 10;            // 升级台词后的保护窗口，兼作 nearThreshold 的 ±N
+var SQUIRT_LINE_BLOCK_CLICKS = 10;           // 水枪前 10 下不出随机台词（squirtTotal 累计，跨轮不清零）
 var DEFAULT_LINE_MS         = 1500;
 var LINE_WET_MS             = 2036;
 var LINE_STAGE2_MS          = 2146;
@@ -318,8 +319,12 @@ var S = {
   squirtCount: 0,
 
   clickSeq: 0,
-  clicksSinceRandomLine: 0,
+  // 两个计数器初值 = 各自冷却上限：开局即「已冷却」，第 1 下就可能冒随机台词（对齐 Android）
+  clicksSinceRandomLineHit: RANDOM_LINE_COOLDOWN_CLICKS_HIT,
+  clicksSinceRandomLineProp: RANDOM_LINE_COOLDOWN_CLICKS_PROP,
   randomLineBlockedUntil: 0,
+  squirtTotal: 0,                   // 水枪累计，跨轮不清零，只用于「前 10 下不出台词」
+  streakEndsAtMs: 0,                // 连击到期的绝对时刻，用于从后台回来时补判超时
 
   lineDurationMs: 0,
   lineEndsAtMs: 0,
@@ -569,12 +574,21 @@ function isValidThresholds(t) {
   }
   return true;
 }
-function ensureThresholds() {
-  if (isValidThresholds(S.thresholds)) return;
-  S.thresholds = STATE_THRESHOLD_RANGES.map(function (r) {
+// 随机一组阈值并落盘。末尾强制严格递增（对齐 Android RerollStateThresholds）：
+// 区间本身不重叠、理论上不会撞车，但保留这道修正以与 Android 行为逐字一致。
+function rerollThresholds() {
+  var t = STATE_THRESHOLD_RANGES.map(function (r) {
     return r[0] + Math.floor(Math.random() * (r[1] - r[0] + 1));
   });
-  saveStats();                        // 首次立刻落盘：重启后形态不会倒退
+  for (var i = 1; i < t.length; i++) {
+    if (t[i] <= t[i - 1]) t[i] = t[i - 1] + 1;
+  }
+  S.thresholds = t;
+  saveStats();                        // 立刻落盘：重启后形态不会倒退
+}
+function ensureThresholds() {
+  if (isValidThresholds(S.thresholds)) return;
+  rerollThresholds();
 }
 function loadStats() {
   var d = Store.read(KEY_STATS, null);
@@ -631,7 +645,8 @@ function applyStateVisual() {
 
 function clickTick() {
   S.clickSeq++;
-  S.clicksSinceRandomLine++;
+  S.clicksSinceRandomLineHit++;      // 三个入口共用，两个计数器同步 ++（对齐 Android onClickTick）
+  S.clicksSinceRandomLineProp++;
 }
 function lineIsPlaying() {
   return S.lineDurationMs > 0 && now() < S.lineEndsAtMs;
@@ -649,21 +664,30 @@ function playNodeLine(id, fallbackMs) {
 // 逼近升级节点（±10 下）时不放随机台词，保证"升级台词"能被听到
 function nearThreshold(t) {
   var remain = t - S.streakHits;
-  return remain >= 0 && remain <= NEAR_NODE_CLICKS;
+  return remain >= 0 && remain <= NODE_LINE_BLOCK_CLICKS;
 }
 function nearUpgradeNode() {
   if (S.thresholds.length < STATE_COUNT - 1) return false;
   return nearThreshold(S.thresholds[0]) || nearThreshold(S.thresholds[STATE_COUNT - 2]);
 }
-function playRandomLineIfLucky() {
+// leftClick = true 只由主击打入口传入（对齐 Android playRandomLineIfLucky(leftClick)）。
+// 「还没进第一阶段」与「逼近升级节点」两道闸只作用于左键；水枪/中指绕开它们，只用 20 下冷却。
+// 升级台词之后的保护窗口（randomLineBlockedUntil）三个入口通用。
+function playRandomLineIfLucky(leftClick) {
   if (!LINE_RANDOM_IDS.length) return false;
   if (S.clickSeq <= S.randomLineBlockedUntil) return false;
-  if (nearUpgradeNode()) return false;
-  if (S.clicksSinceRandomLine < RANDOM_LINE_COOLDOWN_CLICKS) return false;
+  if (leftClick && S.stateIndex <= 0) return false;
+  if (leftClick && nearUpgradeNode()) return false;
+  if (leftClick) {
+    if (S.clicksSinceRandomLineHit < RANDOM_LINE_COOLDOWN_CLICKS_HIT) return false;
+  } else {
+    if (S.clicksSinceRandomLineProp < RANDOM_LINE_COOLDOWN_CLICKS_PROP) return false;
+  }
   if (Math.floor(Math.random() * 100) >= RANDOM_LINE_PERCENT) return false;
   var id = LINE_RANDOM_IDS[Math.floor(Math.random() * LINE_RANDOM_IDS.length)];
   playLine(id, 0);
-  S.clicksSinceRandomLine = 0;
+  if (leftClick) S.clicksSinceRandomLineHit = 0;
+  else           S.clicksSinceRandomLineProp = 0;
   return true;
 }
 // 升级台词：进第 1 段（有点烦）与进第 5 段（摆烂）
@@ -689,22 +713,38 @@ function popBadge() {
 
 function armStreakReset() {
   if (streakResetTimer) clearTimeout(streakResetTimer);
+  S.streakEndsAtMs = Date.now() + STREAK_RESET_MS;
   streakResetTimer = setTimeout(resetStreak, STREAK_RESET_MS);
 }
+// iOS 会把后台标签页的 setTimeout 一起冻住，只靠定时器会出现
+// 「早就该归零了、右上角计数却还挂着」。所以除了定时器，再按绝对时刻补一次判断：
+// 页面重新可见时、以及每次击打前都查一遍，超时就直接归零。
+function checkStreakTimeout() {
+  if (S.streakHits > 0 && S.streakEndsAtMs > 0 && Date.now() >= S.streakEndsAtMs) {
+    resetStreak();
+    return true;
+  }
+  return false;
+}
 function resetStreak() {
+  if (streakResetTimer) clearTimeout(streakResetTimer);
   streakResetTimer = null;
+  S.streakEndsAtMs = 0;
   S.streakHits = 0;
   popTimers.forEach(clearTimeout);
   popTimers.length = 0;
   S.streakScale = 1;
+  applyStreakScale();
   S.streakVisible = false;
   renderStreak();
+  rerollThresholds();                 // 连击断了 → 新一轮重新随机阈值（对齐 Android streakReset / PC ResetStreak）
   applyStateVisual();
 }
 
 /* ---- 主击打 ---- */
 function onHit() {
   rollTodayIfNeeded();
+  checkStreakTimeout();       // 从后台回来时先把已超时的连击归零，避免"假性延续"
   clickTick();
   S.totalHits++;
   S.todayHits++;
@@ -712,7 +752,7 @@ function onHit() {
 
   var prev = S.stateIndex;
   var played = playStateLine(prev, computeStateIndex());
-  if (!played) played = playRandomLineIfLucky();
+  if (!played) played = playRandomLineIfLucky(true);
   if (!played && !lineIsPlaying()) Audio.play('hit', volumeScalar());
 
   applyStateVisual();
@@ -794,14 +834,23 @@ function exitWet() {
 }
 
 /* ---- 水枪按钮 ---- */
+function playSquirtSound() {
+  Audio.play('squirt_' + (1 + Math.floor(Math.random() * 4)), volumeScalar());
+}
 function doSquirt() {
   clickTick();
-  var willWet = !S.wet && (S.squirtCount + 1 >= SQUIRT_HITS_TO_WET);
-  if (!willWet && !lineIsPlaying()) {
-    if (!playRandomLineIfLucky()) {
-      Audio.play('squirt_' + (1 + Math.floor(Math.random() * 4)), volumeScalar());
+  S.squirtTotal++;                                     // 跨轮不清零，只服务「前 10 下不出台词」
+
+  // 这一下就要变湿（或已经湿着）时不播水声 —— 与 Android squirt() 的判断范围逐字一致。
+  // 前 SQUIRT_LINE_BLOCK_CLICKS 下不参与随机台词，先把水声铺垫出来。
+  if (!S.wet && S.squirtCount + 1 < SQUIRT_HITS_TO_WET) {
+    if (!lineIsPlaying() && S.squirtTotal > SQUIRT_LINE_BLOCK_CLICKS) {
+      if (!playRandomLineIfLucky(false)) playSquirtSound();
+    } else if (!lineIsPlaying()) {
+      playSquirtSound();
     }
   }
+
   showProp('squirt', SQUIRT_PROP_HOLD_MS);
   if (S.wet) { armDryUp(); return; }                     // 已经湿了：续命，不再累计
   S.squirtCount++;
@@ -811,7 +860,9 @@ function doSquirt() {
 /* ---- 中指按钮 ---- */
 function doFinger() {
   clickTick();
-  if (!lineIsPlaying()) Audio.play('despise', volumeScalar());
+  if (!lineIsPlaying() && !playRandomLineIfLucky(false)) {
+    Audio.play('despise', volumeScalar());
+  }
   showProp('finger', FINGER_PROP_HOLD_MS);
 }
 
@@ -901,9 +952,11 @@ function bindEvents() {
     window.visualViewport.addEventListener('scroll', onResize);
   }
 
-  // 切到后台就落盘（等价 Android 的 onPause）
+  // 切到后台就落盘（等价 Android 的 onPause）；回到前台先补一次连击超时判定，
+  // 因为 iOS 冻结标签页时 setTimeout 也一起停了，定时器可能还没轮到就已经过期。
   document.addEventListener('visibilitychange', function () {
     if (document.visibilityState === 'hidden') saveStats();
+    else checkStreakTimeout();
   });
   window.addEventListener('pagehide', function () { saveStats(); });
 }
@@ -968,20 +1021,41 @@ function boot() {
 
   // 自检页 / 调试用
   window.BeatPotato = {
-    version: '1.0.0',
+    version: '1.1.0',
     state: S,
     audio: Audio,
     store: Store,
     dims: DIMS,
     paths: { audio: P_AUDIO, counter: P_COUNT, state: P_STATE },
     sfxNames: SFX_NAMES,
+    // 常量表（自检页/无头断言对照 Android 用）
+    consts: {
+      FRAME_MS: FRAME_MS, POTATO_REF: POTATO_REF, HOLD_MS: HOLD_MS, STATE_COUNT: STATE_COUNT,
+      STATE_THRESHOLD_RANGES: STATE_THRESHOLD_RANGES, STREAK_RESET_MS: STREAK_RESET_MS,
+      RANDOM_LINE_PERCENT: RANDOM_LINE_PERCENT,
+      RANDOM_LINE_COOLDOWN_CLICKS_HIT: RANDOM_LINE_COOLDOWN_CLICKS_HIT,
+      RANDOM_LINE_COOLDOWN_CLICKS_PROP: RANDOM_LINE_COOLDOWN_CLICKS_PROP,
+      NODE_LINE_BLOCK_CLICKS: NODE_LINE_BLOCK_CLICKS,
+      SQUIRT_LINE_BLOCK_CLICKS: SQUIRT_LINE_BLOCK_CLICKS,
+      SQUIRT_HITS_TO_WET: SQUIRT_HITS_TO_WET, WET_HOLD_MS: WET_HOLD_MS
+    },
     layout: function () { return layout; },
     recompute: computeLayout,
     hit: onHit,
     squirt: doSquirt,
     finger: doFinger,
     setVolume: setVolume,
-    startGame: startGame
+    startGame: startGame,
+    // 玩法内核（自检页/无头断言用）
+    resetStreak: resetStreak,
+    exitWet: exitWet,
+    checkStreakTimeout: checkStreakTimeout,
+    rerollThresholds: rerollThresholds,
+    isValidThresholds: isValidThresholds,
+    nearUpgradeNode: nearUpgradeNode,
+    playRandomLineIfLucky: playRandomLineIfLucky,
+    lineIsPlaying: lineIsPlaying,
+    computeStateIndex: computeStateIndex
   };
 }
 

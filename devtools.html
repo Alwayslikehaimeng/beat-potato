@@ -154,11 +154,15 @@ function renderSave() {
     ['总暴打（total）', S.totalHits],
     ['今日暴打（today）', S.todayHits],
     ['今日日期（date）', S.todayDate || '（还没写）'],
-    ['形态阈值 thresholds', S.thresholds.join(' , ') + '   ←  每次安装随机生成，之后固定'],
-    ['当前连击 streakHits', S.streakHits],
+    ['形态阈值 thresholds', S.thresholds.join(' , ') + '   ←  每轮连击断掉都会重新随机；重启读回同一组'],
+    ['当前连击 streakHits', S.streakHits + (S.streakEndsAtMs > 0
+        ? '   （' + (Math.max(0, S.streakEndsAtMs - Date.now()) / 1000).toFixed(1) + 's 后归零）' : '')],
     ['当前形态 stateIndex', S.stateIndex + ' / 5'],
     ['是否湿身 wet', S.wet ? '是' : '否'],
     ['水枪计数 squirtCount', S.squirtCount + ' / 5'],
+    ['水枪累计 squirtTotal', S.squirtTotal + '   ←  前 ' + bp.consts.SQUIRT_LINE_BLOCK_CLICKS + ' 下不出随机台词（跨轮不清零）'],
+    ['随机台词冷却（左键）', S.clicksSinceRandomLineHit + ' / ' + bp.consts.RANDOM_LINE_COOLDOWN_CLICKS_HIT],
+    ['随机台词冷却（道具）', S.clicksSinceRandomLineProp + ' / ' + bp.consts.RANDOM_LINE_COOLDOWN_CLICKS_PROP],
     ['音量 volumePercent', S.volumePercent + '%'],
     ['localStorage 可用', bp.store.ok ? '<span class="ok">是</span>' : '<span class="bad">否（不会保存）</span>']
   ];
@@ -252,8 +256,8 @@ document.querySelectorAll('[data-act]').forEach(function (b) {
     else if (a === 'hit100') for (var j = 0; j < 100; j++) bp.hit();
     else if (a === 'squirt') bp.squirt();
     else if (a === 'finger') bp.finger();
-    else if (a === 'dry') { bp.state.wet = false; bp.recompute(); }
-    else if (a === 'reset') { bp.state.streakHits = 0; bp.recompute(); }
+    else if (a === 'dry') bp.exitWet();
+    else if (a === 'reset') bp.resetStreak();
     else if (a === 'start') bp.startGame();
     setTimeout(function () { renderSave(); renderLive(); }, 60);
   });

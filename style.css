@@ -10,7 +10,8 @@
   --btn:       56px;      /* 道具按钮边长（Android PROP_BUTTON_DP） */
   --btn-radius: 14px;
   --btn-margin: 6px;
-  /* 道具条离底距离：--bar-bottom-px 由 JS 按土豆比例写入，再叠上刘海屏安全区 */
+  /* 道具条离底距离 = Android PROP_BAR_BOTTOM_DP(56f)，固定不随土豆缩放，
+     再叠上刘海屏安全区。--bar-bottom-px 留作调试覆盖用。 */
   --bar-bottom: calc(var(--bar-bottom-px, 56px) + env(safe-area-inset-bottom, 0px));
 }
 
@@ -172,7 +173,8 @@ html, body {
   gap: 18px;
 }
 
-/* 漫画贴纸质感的按钮：纸白底 + 墨线 + 硬阴影；按下本体下沉盖住阴影 */
+/* 漫画贴纸质感的按钮：纸白底 + 墨线 + 硬阴影。
+   按下时（对齐 Android PropButtonView.onDraw）：本体不动、阴影上浮 0.55×3dp、图标下移 2dp */
 .prop-btn {
   position: relative;
   width: var(--btn);
@@ -182,14 +184,16 @@ html, body {
   background: transparent;
   -webkit-tap-highlight-color: transparent;
 }
-.prop-btn::before {                 /* 硬阴影：始终留在原地 */
+.prop-btn::before {                 /* 硬阴影 */
   content: '';
   position: absolute;
   inset: 0;
-  top: 3px;
+  top: 3px;                         /* PROP_SHADOW_DROP_DP */
   border-radius: var(--btn-radius);
   background: var(--ink);
+  transition: top 40ms ease-out;
 }
+.prop-btn:active::before { top: 1.35px; }   /* 上浮 0.55 × 3dp */
 .prop-btn .face {
   position: absolute;
   inset: 0;
@@ -198,15 +202,15 @@ html, body {
   background: var(--paper);
   display: grid;
   place-items: center;
-  transition: transform 40ms ease-out;
 }
-.prop-btn:active .face { transform: translateY(3px); }
 .prop-btn .face img {
   width: calc(100% - var(--btn-margin) * 2);
   height: calc(100% - var(--btn-margin) * 2);
   object-fit: contain;
   -webkit-user-drag: none;
+  transition: transform 40ms ease-out;
 }
+.prop-btn:active .face img { transform: translateY(2px); }   /* PROP_PRESS_PUSH_DP */
 
 /* ------------------------------------------------------------ 展开图（闪现） */
 #flashImage {
