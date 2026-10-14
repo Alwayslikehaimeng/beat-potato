@@ -325,6 +325,7 @@ var S = {
   randomLineBlockedUntil: 0,
   squirtTotal: 0,                   // 水枪累计，跨轮不清零，只用于「前 10 下不出台词」
   streakEndsAtMs: 0,                // 连击到期的绝对时刻，用于从后台回来时补判超时
+  wetEndsAtMs: 0,                   // 湿身到期的绝对时刻，同上（iOS 后台会冻住 setTimeout）
 
   lineDurationMs: 0,
   lineEndsAtMs: 0,
@@ -477,10 +478,21 @@ function renderTotal() {
   totalLabel.textContent = '总暴打 ' + S.totalHits;
 }
 
+// 隐藏一个徽章容器 —— 必须连子元素一起隐藏！
+// visibility 是继承属性，但子元素一旦自己声明了 visible 就会盖掉父元素的 hidden。
+// renderStrip() 会给每个复用的 <img> 写内联 visibility:visible，
+// 所以只设容器 style.visibility='hidden' 的话，数字会照旧画在屏幕上
+// （用户报的「一段时间不打，右上角计数不消失」就是这个）。
+function hideBadge(host) {
+  host.style.visibility = 'hidden';
+  var pool = host._pool || [];
+  for (var i = 0; i < pool.length; i++) pool[i].style.visibility = 'hidden';
+}
+
 // 连击徽章：贴在土豆右上角外侧；数字贴在一个随机爆点上
 function renderStreak() {
   if (!S.streakVisible || S.streakHits <= 0) {
-    streakBadge.style.visibility = 'hidden';
+    hideBadge(streakBadge);
     return;
   }
   var L = layout;
@@ -792,6 +804,7 @@ function showProp(which, ms) {
 
 function armDryUp() {
   if (dryUpTimer) clearTimeout(dryUpTimer);
+  S.wetEndsAtMs = Date.now() + WET_HOLD_MS;
   dryUpTimer = setTimeout(exitWet, WET_HOLD_MS);
 }
 
@@ -827,10 +840,23 @@ function enterWet() {
 }
 function exitWet() {
   if (!S.wet) return;
+  if (dryUpTimer) clearTimeout(dryUpTimer);
   dryUpTimer = null;
+  S.wetEndsAtMs = 0;
   S.wet = false;
   showFrame(currentStateFrame());
   applyPropLayout();
+}
+
+// 与连击超时同源：iOS 会把后台标签页的 setTimeout 一起冻住，
+// 只靠定时器会出现「早该干了、湿身却一直挂着」→ 水枪再也发不出声音。
+// 页面重新可见时、以及每次按水枪前都按绝对时刻补判一次。
+function checkWetTimeout() {
+  if (S.wet && S.wetEndsAtMs > 0 && Date.now() >= S.wetEndsAtMs) {
+    exitWet();
+    return true;
+  }
+  return false;
 }
 
 /* ---- 水枪按钮 ---- */
@@ -839,15 +865,19 @@ function playSquirtSound() {
 }
 function doSquirt() {
   clickTick();
+  checkWetTimeout();                                   // 后台冻结回来时，早该干了就先干掉
   S.squirtTotal++;                                     // 跨轮不清零，只服务「前 10 下不出台词」
 
-  // 这一下就要变湿（或已经湿着）时不播水声 —— 与 Android squirt() 的判断范围逐字一致。
-  // 前 SQUIRT_LINE_BLOCK_CLICKS 下不参与随机台词，先把水声铺垫出来。
-  if (!S.wet && S.squirtCount + 1 < SQUIRT_HITS_TO_WET) {
-    if (!lineIsPlaying() && S.squirtTotal > SQUIRT_LINE_BLOCK_CLICKS) {
+  // willWet = 这一下就要变湿。此时不播水声（紧接着 enterWet 会播 line_wet 语音）。
+  // 注意这里**只**排除「即将变湿」那一下，不能再写成 !S.wet：
+  // 湿身期间每按一次水枪都会 armDryUp() 续命 4 秒，若把整段水声一起挡掉，
+  // 用户连按水枪就会从第 6 下开始完全没声音（用户报的「五次触发语音后水声消失」）。
+  var willWet = !S.wet && (S.squirtCount + 1 >= SQUIRT_HITS_TO_WET);
+  if (!willWet && !lineIsPlaying()) {
+    if (S.squirtTotal > SQUIRT_LINE_BLOCK_CLICKS) {
       if (!playRandomLineIfLucky(false)) playSquirtSound();
-    } else if (!lineIsPlaying()) {
-      playSquirtSound();
+    } else {
+      playSquirtSound();                               // 前 10 下不参与随机台词，先把水声铺垫出来
     }
   }
 
@@ -956,7 +986,7 @@ function bindEvents() {
   // 因为 iOS 冻结标签页时 setTimeout 也一起停了，定时器可能还没轮到就已经过期。
   document.addEventListener('visibilitychange', function () {
     if (document.visibilityState === 'hidden') saveStats();
-    else checkStreakTimeout();
+    else { checkStreakTimeout(); checkWetTimeout(); }
   });
   window.addEventListener('pagehide', function () { saveStats(); });
 }
@@ -1050,6 +1080,7 @@ function boot() {
     resetStreak: resetStreak,
     exitWet: exitWet,
     checkStreakTimeout: checkStreakTimeout,
+    checkWetTimeout: checkWetTimeout,
     rerollThresholds: rerollThresholds,
     isValidThresholds: isValidThresholds,
     nearUpgradeNode: nearUpgradeNode,
