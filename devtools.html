@@ -289,14 +289,16 @@ var tries = 0;
   try { ready = !!(w && w.BeatPotato && w.BeatPotato.state.ready); } catch (e) { ready = false; }
   // 必须等「预载完成」再渲染：素材尺寸表和音效时长都是预载过程中才填进来的，
   // 早了会渲染出一份残缺的列表（这正是本页第一次写出来时的 bug）。
-  if (w && w.BeatPotato && (ready || tries > 150)) {
+  // 兜底放宽到 900 次（90 秒）：线上首次加载要拉 10MB 素材，实测约 50 秒，
+  // 原来的 150 次（15 秒）会在线上提前兜底，渲染出只有十几个格子的残缺素材表。
+  if (w && w.BeatPotato && ready) {
     bp = w.BeatPotato;
     try { w.addEventListener('error', function (e) { (window.__bpErrors = window.__bpErrors || []).push(e.message); }); } catch (e) {}
     renderEnv(); renderSave(); renderSfx(); renderAssets(); renderLive();
     setInterval(function () { renderSave(); renderLive(); }, 400);
     return;
   }
-  if (++tries > 400) {
+  if (++tries > 900) {
     document.getElementById('liveBox').textContent = '游戏实例一直没起来，检查 index.html 是否报错。';
     return;
   }
